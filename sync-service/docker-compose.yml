@@ -1,0 +1,35 @@
+services:
+  sync-service:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - SYNC_INTERVAL_MINUTES=${SYNC_INTERVAL_MINUTES:-5}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - ACTUAL_BRIDGE_URL=http://actual-bridge:3000
+    depends_on:
+      - actual-bridge
+    restart: unless-stopped
+    networks:
+      - default
+      - actual-network
+
+  actual-bridge:
+    build: ../actual-bridge
+    ports:
+      - "3000:3000"
+    environment:
+      - ACTUAL_SERVER_URL=${ACTUAL_SERVER_URL:-http://actual-budget:5006}
+      - ACTUAL_PASSWORD=${ACTUAL_PASSWORD}
+      - ACTUAL_BUDGET_ID=${ACTUAL_BUDGET_ID}
+    restart: unless-stopped
+    networks:
+      - default
+      - actual-network
+
+networks:
+  actual-network:
+    external: true
+    name: ${ACTUAL_NETWORK_NAME:-actual_default}
