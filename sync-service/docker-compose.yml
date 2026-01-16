@@ -1,6 +1,7 @@
 services:
   sync-service:
     build: .
+    container_name: tg-sync-service
     ports:
       - "8000:8000"
     environment:
@@ -9,27 +10,30 @@ services:
       - SYNC_INTERVAL_MINUTES=${SYNC_INTERVAL_MINUTES:-5}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - ACTUAL_BRIDGE_URL=http://actual-bridge:3000
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
     depends_on:
       - actual-bridge
     restart: unless-stopped
     networks:
-      - default
-      - actual-network
+      - shared-network
 
   actual-bridge:
     build: ../actual-bridge
+    container_name: actual-bridge
     ports:
-      - "3000:3000"
+      - "3002:3000"
     environment:
       - ACTUAL_SERVER_URL=${ACTUAL_SERVER_URL:-http://actual-budget:5006}
       - ACTUAL_PASSWORD=${ACTUAL_PASSWORD}
       - ACTUAL_BUDGET_ID=${ACTUAL_BUDGET_ID}
+      - DATA_DIR=/data
+    volumes:
+      - ./actual-bridge-data:/data
     restart: unless-stopped
     networks:
-      - default
-      - actual-network
+      - shared-network
 
 networks:
-  actual-network:
+  shared-network:
     external: true
-    name: ${ACTUAL_NETWORK_NAME:-actual_default}

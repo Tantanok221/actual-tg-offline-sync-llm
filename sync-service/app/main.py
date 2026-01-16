@@ -8,7 +8,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.config import settings
 from app.supabase_client import fetch_unsynced_messages, mark_as_synced
 from app.actual_client import get_accounts, get_categories, add_transaction
-from app.gemini_client import parse_transaction
+from app.gemini_client import parse_transactions_batch
+from app.telegram_client import send_sync_summary
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,16 +20,10 @@ logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
 
 
-def process_message(msg: dict, accounts: list[dict], categories: list[dict]) -> bool:
-    """Process a single message and add to Actual Budget if valid."""
-    message_text = msg["message"]
-
-    # Parse with Gemini
-    parsed = parse_transaction(message_text, accounts, categories)
-
+def add_single_transaction(msg_id: str, parsed: dict, accounts: list[dict], categories: list[dict], tx_index: int = 0) -> dict | None:
+    """Add a single parsed transaction to Actual Budget. Returns transaction info for summary or None on failure."""
     if not parsed or not parsed.get("valid"):
-        logger.info(f"Message not a valid transaction: {message_text[:50]}...")
-        return True  # Still mark as processed
+        return None
 
     # Find account ID by name
     account_name = parsed.get("account_name")
@@ -40,7 +35,7 @@ def process_message(msg: dict, accounts: list[dict], categories: list[dict]) -> 
 
     if not account_id:
         logger.warning(f"Account not found: {account_name}")
-        return False
+        return None
 
     # Find category ID by name
     category_id = None
@@ -56,13 +51,14 @@ def process_message(msg: dict, accounts: list[dict], categories: list[dict]) -> 
     if parsed.get("is_expense", True):
         amount = -amount  # Expenses are negative
 
-    # Build transaction
+    # Build transaction with unique imported_id for multiple transactions from same message
+    imported_id = f"{msg_id}-{tx_index}" if tx_index > 0 else msg_id
     transaction = {
         "date": date.today().isoformat(),
         "amount": amount,
         "payee_name": parsed.get("payee_name", "Unknown"),
-        "notes": parsed.get("notes", ""),
-        "imported_id": msg["id"],  # Use Supabase ID to prevent duplicates
+        "notes": parsed.get("notes") or "",
+        "imported_id": imported_id,
     }
 
     if category_id:
@@ -71,7 +67,30 @@ def process_message(msg: dict, accounts: list[dict], categories: list[dict]) -> 
     # Add to Actual Budget
     add_transaction(account_id, transaction)
     logger.info(f"Added transaction: {parsed['payee_name']} - {parsed['amount']}")
-    return True
+
+    # Return transaction info for summary
+    return {
+        "amount": parsed["amount"],
+        "payee_name": parsed.get("payee_name", "Unknown"),
+        "category_name": category_name or "Uncategorized",
+    }
+
+
+def process_message_transactions(msg: dict, transactions: list[dict], accounts: list[dict], categories: list[dict]) -> tuple[bool, list[dict]]:
+    """Process all transactions for a single message. Returns (success, list of added transactions)."""
+    if not transactions:
+        logger.info(f"No transactions in message: {msg['message'][:50]}...")
+        return False, []
+
+    added_transactions = []
+    for i, tx in enumerate(transactions):
+        result = add_single_transaction(msg["id"], tx, accounts, categories, i)
+        if result:
+            added_transactions.append(result)
+
+    success = len(added_transactions) == len(transactions)
+    logger.info(f"Message {msg['id']}: {len(added_transactions)}/{len(transactions)} transactions added")
+    return success, added_transactions
 
 
 async def sync_job():
@@ -88,17 +107,29 @@ async def sync_job():
         accounts = get_accounts()
         categories = get_categories()
 
+        # Parse all messages in a single Gemini call
+        logger.info(f"Parsing {len(messages)} messages with Gemini (batch)")
+        parsed_results = parse_transactions_batch(messages, accounts, categories)
+
+        # Process each message's transactions
         processed_ids = []
-        for msg in messages:
+        all_added_transactions = []
+        for msg, transactions in zip(messages, parsed_results):
             logger.info(f"Processing message: {msg['id']} - {msg['message'][:50]}...")
-            if process_message(msg, accounts, categories):
+            success, added = process_message_transactions(msg, transactions, accounts, categories)
+            if success:
                 processed_ids.append(msg["id"])
+                all_added_transactions.extend(added)
 
         # Mark processed messages as synced
         if processed_ids:
             mark_as_synced(processed_ids)
 
-        logger.info(f"Sync job completed - processed {len(processed_ids)} messages")
+        # Send Telegram summary
+        if all_added_transactions:
+            send_sync_summary(len(processed_ids), all_added_transactions)
+
+        logger.info(f"Sync job completed - {len(processed_ids)} messages, {len(all_added_transactions)} transactions")
     except Exception as e:
         logger.error(f"Sync job failed: {e}")
 

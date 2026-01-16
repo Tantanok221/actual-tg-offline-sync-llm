@@ -28,6 +28,9 @@ build/
 # Docker
 *.log
 
+# Actual Bridge data
+sync-service/actual-bridge-data/
+
 # Supabase
 supabase/.branches
 supabase/.temp
